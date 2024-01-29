@@ -14,7 +14,7 @@ import numpy as np
 from grover.util.utils import get_task_names
 from grover.util.utils import makedirs
 from task.run_evaluation import run_evaluation, run_evaluation_cfm
-from task.train import run_training
+from task.train import run_training, run_training_cfm
 
 import random
 import torch
@@ -97,13 +97,15 @@ def randomsearch(args: Namespace, logger: Logger = None) -> Tuple[float, float]:
     dropout_list = [0, 0.05, 0.1, 0.15, 0.2]
     attn_hidden_list = 128
     attn_out_list = [4, 8]
-    dist_coff_list = [0.05, 0.1, 0.15, 0.20]
+    dist_coff_list = [0.05, 0.1, 0.15]
     bond_drop_rate_list = [0, 0.2, 0.4, 0.6]
-    ffn_num_layers_list = [2, 3]
-    ffn_dense_list = [300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300]
+#    ffn_num_layers_list = [2, 3]
+    ffn_num_layers_list = [2, 3, 4, 5]
+    ffn_dense_list = [300, 500, 700, 900, 1100, 1300]
     smote_rate_list = [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]
 
     # Run training with different random seeds for each fold
+    all_scores_main_metric = []
     all_scores = []
     params = []
     time_start = time.strftime("%Y_%m_%d_%H_%M_%S", time.localtime())
@@ -135,17 +137,44 @@ def randomsearch(args: Namespace, logger: Logger = None) -> Tuple[float, float]:
         makedirs(args.save_dir)
 
         fold_scores = []
+        if args.confusionmatrix:
+            scores_AUC = []
+            scores_ACC = []
+            scores_REC = []
+            scores_PREC = []
+            scores_SPEC = []
+            scores_F1 = []
+            scores_BA = []
+            scores_TP = []
+            scores_FP = []
+            scores_TN = []
+            scores_FN = []
         for fold_num in range(args.num_folds):
             info(f'Fold {fold_num}')
             args.seed = init_seed + fold_num
             args.save_dir = os.path.join(iter_dir, f'fold_{fold_num}')
             makedirs(args.save_dir)
-            if args.parser_name == "finetune":
+            if args.parser_name == "finetune" and args.confusionmatrix:
+                model_scores, AUC, ACC, REC, PREC, SPEC, F1, BA, TP, FP, TN, FN = run_training_cfm(args, time_start, logger)
+                scores_AUC.append(AUC)
+                scores_ACC.append(ACC)
+                scores_REC.append(REC)
+                scores_PREC.append(PREC)
+                scores_SPEC.append(SPEC)
+                scores_F1.append(F1)
+                scores_BA.append(BA)
+                scores_TP.append(TP)
+                scores_FP.append(FP)
+                scores_TN.append(TN)
+                scores_FN.append(FN)
+            elif args.parser_name == "finetune":
                 model_scores = run_training(args, time_start, logger)
             else:
                 model_scores = run_evaluation(args, logger)
-#change below line for compare average score
+                
+            #change below line for compare average score
             fold_scores.append(model_scores)
+        
         fold_scores = np.array(fold_scores)
 
         # Report scores for each fold
@@ -170,31 +199,123 @@ def randomsearch(args: Namespace, logger: Logger = None) -> Tuple[float, float]:
                 info(f'Overall test {task_name} {args.metric} = '
                      f'{np.nanmean(fold_scores[:, task_num]):.6f} +/- {np.nanstd(fold_scores[:, task_num]):.6f}')
 
-        all_scores.append(fold_mean_score)
+        all_scores_main_metric.append(fold_mean_score)
+        
+        if args.confusionmatrix:
+            scores_AUC = np.array(scores_AUC)
+            scores_ACC = np.array(scores_ACC)
+            scores_REC = np.array(scores_REC)
+            scores_PREC = np.array(scores_PREC)
+            scores_SPEC = np.array(scores_SPEC)
+            scores_F1 = np.array(scores_F1)
+            scores_BA = np.array(scores_BA)
+            scores_TN = np.array(scores_TN)
+            scores_FN = np.array(scores_FN)
+            scores_TP = np.array(scores_TP)
+            scores_FP = np.array(scores_FP)
+            # Report scores for each fold
+            info(f'{args.num_folds}-fold cross validation')
+
+            # Report scores across models
+            avg_scores_AUC = np.nanmean(scores_AUC, axis=1)  # average score for each model across tasks
+            mean_score_AUC, std_score_AUC = np.nanmean(avg_scores_AUC), np.nanstd(avg_scores_AUC)
+            info(f'overall_{args.split_type}_test_AUC={mean_score_AUC:.6f}')
+            info(f'std={std_score_AUC:.6f}')
+
+            avg_scores_ACC = np.nanmean(scores_ACC, axis=1)  # average score for each model across tasks
+            mean_score_ACC, std_score_ACC = np.nanmean(avg_scores_ACC), np.nanstd(avg_scores_ACC)
+            info(f'overall_{args.split_type}_test_Accuracy={mean_score_ACC:.6f}')
+            info(f'std={std_score_ACC:.6f}')
+
+            avg_scores_REC = np.nanmean(scores_REC, axis=1)  # average score for each model across tasks
+            mean_score_REC, std_score_REC = np.nanmean(avg_scores_REC), np.nanstd(avg_scores_REC)
+            info(f'overall_{args.split_type}_test_Recall={mean_score_REC:.6f}')
+            info(f'std={std_score_REC:.6f}')
+
+            avg_scores_PREC = np.nanmean(scores_PREC, axis=1)  # average score for each model across tasks
+            mean_score_PREC, std_score_PREC = np.nanmean(avg_scores_PREC), np.nanstd(avg_scores_PREC)
+            info(f'overall_{args.split_type}_test_Precision={mean_score_PREC:.6f}')
+            info(f'std={std_score_PREC:.6f}')
+
+            avg_scores_SPEC = np.nanmean(scores_SPEC, axis=1)  # average score for each model across tasks
+            mean_score_SPEC, std_score_SPEC = np.nanmean(avg_scores_SPEC), np.nanstd(avg_scores_SPEC)
+            info(f'overall_{args.split_type}_test_Specificity={mean_score_SPEC:.6f}')
+            info(f'std={std_score_SPEC:.6f}')
+
+            avg_scores_F1 = np.nanmean(scores_F1, axis=1)  # average score for each model across tasks
+            mean_score_F1, std_score_F1 = np.nanmean(avg_scores_F1), np.nanstd(avg_scores_F1)
+            info(f'overall_{args.split_type}_test_F1={mean_score_F1:.6f}')
+            info(f'std={std_score_F1:.6f}')
+
+            avg_scores_BA = np.nanmean(scores_BA, axis=1)  # average score for each model across tasks
+            mean_score_BA, std_score_BA = np.nanmean(avg_scores_BA), np.nanstd(avg_scores_BA)
+            info(f'overall_{args.split_type}_test_BA={mean_score_BA:.6f}')
+            info(f'std={std_score_BA:.6f}')
+
+            avg_scores_TP = np.nanmean(scores_TP)  # average score for each model across tasks
+            mean_score_TP, std_score_TP = np.nanmean(avg_scores_TP), np.nanstd(avg_scores_TP)
+
+            avg_scores_FP = np.nanmean(scores_FP)  # average score for each model across tasks
+            mean_score_FP, std_score_FP = np.nanmean(avg_scores_FP), np.nanstd(avg_scores_FP)
+
+            avg_scores_TN = np.nanmean(scores_TN)  # average score for each model across tasks
+            mean_score_TN, std_score_TN = np.nanmean(avg_scores_TN), np.nanstd(avg_scores_TN)
+
+            avg_scores_FN = np.nanmean(scores_FN)  # average score for each model across tasks
+            mean_score_FN, std_score_FN = np.nanmean(avg_scores_FN), np.nanstd(avg_scores_FN)
+            info(f'TP : {mean_score_TP:.6f}\tFP : {mean_score_FP:.6f}')
+            info(f'FN : {mean_score_FN:.6f}\tTN : {mean_score_TN:.6f}')
+            
+            all_scores.append([mean_score_AUC, mean_score_ACC, mean_score_REC, mean_score_PREC, mean_score_SPEC, mean_score_F1, mean_score_BA, mean_score_TP, mean_score_FP, mean_score_TN, mean_score_FN])
+
+
+            if args.show_individual_scores:
+                for task_num, task_name in enumerate(task_names):
+                    info(f'Overall test {task_name} {args.metric} = '
+                         f'{np.nanmean(all_scores_main_metric[:, task_num]):.6f} +/- {np.nanstd(all_scores_main_metric[:, task_num]):.6f}')
 
 ############fold end, save fold_data and initialize seed
 
         # best setting save
-        if args.dataset_type=='classification' : 
-            if max(all_scores)==fold_mean_score : 
+        if args.dataset_type=='classification' and args.confusionmatrix:
+            if max(all_scores_main_metric)==fold_mean_score : 
+                best_iter = iter_num
+                best_score = fold_mean_score
+                best_param = params[iter_num]
+        elif args.dataset_type=='classification' : 
+            if max(all_scores_main_metric)==fold_mean_score : 
                 best_iter = iter_num
                 best_score = fold_mean_score
                 best_param = params[iter_num]
         else : 
-            if min(all_scores)==fold_mean_score : 
+            if min(all_scores_main_metric)==fold_mean_score : 
                 best_iter = iter_num
                 best_score = fold_mean_score
                 best_param = params[iter_num]
 ############iter end
 
-    all_scores = np.array(all_scores)
+    all_scores_main_metric = np.array(all_scores_main_metric)
 
     # Report scores for each iter
     info(f'\n---- {args.n_iters}-iter random search ----')
 
-    for iter_num, scores in enumerate(all_scores):
-        info(params[iter_num])
-        info(f'Seed {init_seed} ==> test {args.metric} = {np.nanmean(scores):.6f}\n')
+    if args.confusionmatrix:
+        all_scores = np.array(all_scores)
+        for iter_num, scores in enumerate(all_scores):
+            info(params[iter_num])
+            info(f'Seed {init_seed} ==> test AUC = {np.nanmean(scores[0]):.6f}\n')
+            info(f'Seed {init_seed} ==> test ACC = {np.nanmean(scores[1]):.6f}\n')
+            info(f'Seed {init_seed} ==> test REC = {np.nanmean(scores[2]):.6f}\n')
+            info(f'Seed {init_seed} ==> test PREC = {np.nanmean(scores[3]):.6f}\n')
+            info(f'Seed {init_seed} ==> test SPEC = {np.nanmean(scores[4]):.6f}\n')
+            info(f'Seed {init_seed} ==> test F1 = {np.nanmean(scores[5]):.6f}\n')
+            info(f'Seed {init_seed} ==> test BA = {np.nanmean(scores[6]):.6f}\n')
+            info(f'TP : {np.nanmean(scores[7]):.6f}\tFP : {np.nanmean(scores[8]):.6f}')
+            info(f'FN : {np.nanmean(scores[10]):.6f}\tTN : {np.nanmean(scores[9]):.6f}')
+    else:
+        for iter_num, scores in enumerate(all_scores_main_metric):
+            info(params[iter_num])
+            info(f'Seed {init_seed} ==> test {args.metric} = {np.nanmean(scores):.6f}\n')
 
     # Report best model
     info(f'\nbest_iter : {best_iter}\nbest_score is {np.nanmean(best_score)}\nbest_param : {best_param}')
@@ -480,96 +601,116 @@ def make_confusion_matrix(args: Namespace, logger: Logger = None) -> Tuple[float
     scores_FN = []
 
     time_start = time.strftime("%Y_%m_%d_%H_%M_%S", time.localtime())
-    for fold_num in range(args.num_folds):
-        info(f'Fold {fold_num}')
-        args.seed = init_seed + fold_num
-        args.save_dir = os.path.join(save_dir, f'fold_{fold_num}')
-        makedirs(args.save_dir)
-        if args.dataset_type == "regression":
+    if args.dataset_type == "regression":
+        for fold_num in range(args.num_folds):
+            info(f'Fold {fold_num}')
+            args.seed = init_seed + fold_num
+            args.save_dir = os.path.join(save_dir, f'fold_{fold_num}')
+            #makedirs(args.save_dir)
+        
             model_scores = run_evaluation(args, logger)
-        else:
+            scores_AUC.append(model_scores)
+        # Report scores for each fold
+        info(f'{args.num_folds}-fold cross validation')
+
+        # Report scores across models
+        avg_scores = np.nanmean(scores_AUC, axis=1)  # average score for each model across tasks
+        mean_score, std_score = np.nanmean(avg_scores), np.nanstd(avg_scores)
+        info(f'overall_{args.split_type}_test_AUC={mean_score:.6f}')
+        info(f'std={std_score:.6f}')
+
+        return mean_score, std_score
+
+            
+    else:
+        for fold_num in range(args.num_folds):
+            info(f'Fold {fold_num}')
+            args.seed = init_seed + fold_num
+            args.save_dir = os.path.join(save_dir, f'fold_{fold_num}')
+            makedirs(args.save_dir)
+            
             AUC, ACC, REC, PREC, SPEC, F1, BA, TP, FP, TN, FN = run_evaluation_cfm(args, logger)
-        scores_AUC.append(AUC)
-        scores_ACC.append(ACC)
-        scores_REC.append(REC)
-        scores_PREC.append(PREC)
-        scores_SPEC.append(SPEC)
-        scores_F1.append(F1)
-        scores_BA.append(BA)
-        scores_TP.append(TP)
-        scores_FP.append(FP)
-        scores_TN.append(TN)
-        scores_FN.append(FN)
-    scores_AUC = np.array(scores_AUC)
-    scores_ACC = np.array(scores_ACC)
-    scores_REC = np.array(scores_REC)
-    scores_PREC = np.array(scores_PREC)
-    scores_SPEC = np.array(scores_SPEC)
-    scores_F1 = np.array(scores_F1)
-    scores_BA = np.array(scores_BA)
-    scores_TN = np.array(scores_TN)
-    scores_FN = np.array(scores_FN)
-    scores_TP = np.array(scores_TP)
-    scores_FP = np.array(scores_FP)
+            scores_AUC.append(AUC)
+            scores_ACC.append(ACC)
+            scores_REC.append(REC)
+            scores_PREC.append(PREC)
+            scores_SPEC.append(SPEC)
+            scores_F1.append(F1)
+            scores_BA.append(BA)
+            scores_TP.append(TP)
+            scores_FP.append(FP)
+            scores_TN.append(TN)
+            scores_FN.append(FN)
+        scores_AUC = np.array(scores_AUC)
+        scores_ACC = np.array(scores_ACC)
+        scores_REC = np.array(scores_REC)
+        scores_PREC = np.array(scores_PREC)
+        scores_SPEC = np.array(scores_SPEC)
+        scores_F1 = np.array(scores_F1)
+        scores_BA = np.array(scores_BA)
+        scores_TN = np.array(scores_TN)
+        scores_FN = np.array(scores_FN)
+        scores_TP = np.array(scores_TP)
+        scores_FP = np.array(scores_FP)
 
-    # Report scores for each fold
-    info(f'{args.num_folds}-fold cross validation')
+        # Report scores for each fold
+        info(f'{args.num_folds}-fold cross validation')
 
-    # Report scores across models
-    avg_scores_AUC = np.nanmean(scores_AUC, axis=1)  # average score for each model across tasks
-    mean_score_AUC, std_score_AUC = np.nanmean(avg_scores_AUC), np.nanstd(avg_scores_AUC)
-    info(f'overall_{args.split_type}_test_AUC={mean_score_AUC:.6f}')
-    info(f'std={std_score_AUC:.6f}')
+        # Report scores across models
+        avg_scores_AUC = np.nanmean(scores_AUC, axis=1)  # average score for each model across tasks
+        mean_score_AUC, std_score_AUC = np.nanmean(avg_scores_AUC), np.nanstd(avg_scores_AUC)
+        info(f'overall_{args.split_type}_test_AUC={mean_score_AUC:.6f}')
+        info(f'std={std_score_AUC:.6f}')
 
-    avg_scores_ACC = np.nanmean(scores_ACC, axis=1)  # average score for each model across tasks
-    mean_score_ACC, std_score_ACC = np.nanmean(avg_scores_ACC), np.nanstd(avg_scores_ACC)
-    info(f'overall_{args.split_type}_test_Accuracy={mean_score_ACC:.6f}')
-    info(f'std={std_score_ACC:.6f}')
+        avg_scores_ACC = np.nanmean(scores_ACC, axis=1)  # average score for each model across tasks
+        mean_score_ACC, std_score_ACC = np.nanmean(avg_scores_ACC), np.nanstd(avg_scores_ACC)
+        info(f'overall_{args.split_type}_test_Accuracy={mean_score_ACC:.6f}')
+        info(f'std={std_score_ACC:.6f}')
 
-    avg_scores_REC = np.nanmean(scores_REC, axis=1)  # average score for each model across tasks
-    mean_score_REC, std_score_REC = np.nanmean(avg_scores_REC), np.nanstd(avg_scores_REC)
-    info(f'overall_{args.split_type}_test_Recall={mean_score_REC:.6f}')
-    info(f'std={std_score_REC:.6f}')
+        avg_scores_REC = np.nanmean(scores_REC, axis=1)  # average score for each model across tasks
+        mean_score_REC, std_score_REC = np.nanmean(avg_scores_REC), np.nanstd(avg_scores_REC)
+        info(f'overall_{args.split_type}_test_Recall={mean_score_REC:.6f}')
+        info(f'std={std_score_REC:.6f}')
 
-    avg_scores_PREC = np.nanmean(scores_PREC, axis=1)  # average score for each model across tasks
-    mean_score_PREC, std_score_PREC = np.nanmean(avg_scores_PREC), np.nanstd(avg_scores_PREC)
-    info(f'overall_{args.split_type}_test_Precision={mean_score_PREC:.6f}')
-    info(f'std={std_score_PREC:.6f}')
+        avg_scores_PREC = np.nanmean(scores_PREC, axis=1)  # average score for each model across tasks
+        mean_score_PREC, std_score_PREC = np.nanmean(avg_scores_PREC), np.nanstd(avg_scores_PREC)
+        info(f'overall_{args.split_type}_test_Precision={mean_score_PREC:.6f}')
+        info(f'std={std_score_PREC:.6f}')
 
-    avg_scores_SPEC = np.nanmean(scores_SPEC, axis=1)  # average score for each model across tasks
-    mean_score_SPEC, std_score_SPEC = np.nanmean(avg_scores_SPEC), np.nanstd(avg_scores_SPEC)
-    info(f'overall_{args.split_type}_test_Specificity={mean_score_SPEC:.6f}')
-    info(f'std={std_score_SPEC:.6f}')
+        avg_scores_SPEC = np.nanmean(scores_SPEC, axis=1)  # average score for each model across tasks
+        mean_score_SPEC, std_score_SPEC = np.nanmean(avg_scores_SPEC), np.nanstd(avg_scores_SPEC)
+        info(f'overall_{args.split_type}_test_Specificity={mean_score_SPEC:.6f}')
+        info(f'std={std_score_SPEC:.6f}')
 
-    avg_scores_F1 = np.nanmean(scores_F1, axis=1)  # average score for each model across tasks
-    mean_score_F1, std_score_F1 = np.nanmean(avg_scores_F1), np.nanstd(avg_scores_F1)
-    info(f'overall_{args.split_type}_test_F1={mean_score_F1:.6f}')
-    info(f'std={std_score_F1:.6f}')
+        avg_scores_F1 = np.nanmean(scores_F1, axis=1)  # average score for each model across tasks
+        mean_score_F1, std_score_F1 = np.nanmean(avg_scores_F1), np.nanstd(avg_scores_F1)
+        info(f'overall_{args.split_type}_test_F1={mean_score_F1:.6f}')
+        info(f'std={std_score_F1:.6f}')
 
-    avg_scores_BA = np.nanmean(scores_BA, axis=1)  # average score for each model across tasks
-    mean_score_BA, std_score_BA = np.nanmean(avg_scores_BA), np.nanstd(avg_scores_BA)
-    info(f'overall_{args.split_type}_test_BA={mean_score_BA:.6f}')
-    info(f'std={std_score_BA:.6f}')
+        avg_scores_BA = np.nanmean(scores_BA, axis=1)  # average score for each model across tasks
+        mean_score_BA, std_score_BA = np.nanmean(avg_scores_BA), np.nanstd(avg_scores_BA)
+        info(f'overall_{args.split_type}_test_BA={mean_score_BA:.6f}')
+        info(f'std={std_score_BA:.6f}')
 
-    avg_scores_TP = np.nanmean(scores_TP)  # average score for each model across tasks
-    mean_score_TP, std_score_TP = np.nanmean(avg_scores_TP), np.nanstd(avg_scores_TP)
+        avg_scores_TP = np.nanmean(scores_TP)  # average score for each model across tasks
+        mean_score_TP, std_score_TP = np.nanmean(avg_scores_TP), np.nanstd(avg_scores_TP)
 
-    avg_scores_FP = np.nanmean(scores_FP)  # average score for each model across tasks
-    mean_score_FP, std_score_FP = np.nanmean(avg_scores_FP), np.nanstd(avg_scores_FP)
+        avg_scores_FP = np.nanmean(scores_FP)  # average score for each model across tasks
+        mean_score_FP, std_score_FP = np.nanmean(avg_scores_FP), np.nanstd(avg_scores_FP)
 
-    avg_scores_TN = np.nanmean(scores_TN)  # average score for each model across tasks
-    mean_score_TN, std_score_TN = np.nanmean(avg_scores_TN), np.nanstd(avg_scores_TN)
+        avg_scores_TN = np.nanmean(scores_TN)  # average score for each model across tasks
+        mean_score_TN, std_score_TN = np.nanmean(avg_scores_TN), np.nanstd(avg_scores_TN)
 
-    avg_scores_FN = np.nanmean(scores_FN)  # average score for each model across tasks
-    mean_score_FN, std_score_FN = np.nanmean(avg_scores_FN), np.nanstd(avg_scores_FN)
-    info(f'TP : {mean_score_TP:.6f}\tFP : {mean_score_FP:.6f}')
-    info(f'FN : {mean_score_FN:.6f}\tTN : {mean_score_TN:.6f}')
+        avg_scores_FN = np.nanmean(scores_FN)  # average score for each model across tasks
+        mean_score_FN, std_score_FN = np.nanmean(avg_scores_FN), np.nanstd(avg_scores_FN)
+        info(f'TP : {mean_score_TP:.6f}\tFP : {mean_score_FP:.6f}')
+        info(f'FN : {mean_score_FN:.6f}\tTN : {mean_score_TN:.6f}')
 
 
-    if args.show_individual_scores:
-        for task_num, task_name in enumerate(task_names):
-            info(f'Overall test {task_name} {args.metric} = '
-                 f'{np.nanmean(all_scores[:, task_num]):.6f} +/- {np.nanstd(all_scores[:, task_num]):.6f}')
+        if args.show_individual_scores:
+            for task_num, task_name in enumerate(task_names):
+                info(f'Overall test {task_name} {args.metric} = '
+                     f'{np.nanmean(all_scores[:, task_num]):.6f} +/- {np.nanstd(all_scores[:, task_num]):.6f}')
 
-    return mean_score_AUC, std_score_AUC
+        return mean_score_AUC, std_score_AUC
 

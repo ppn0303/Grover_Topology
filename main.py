@@ -3,11 +3,12 @@ import random, os
 import numpy as np
 import torch
 from rdkit import RDLogger
+from socket import gethostname
 
 from grover.util.parsing import parse_args, get_newest_train_args
 from grover.util.utils import create_logger
 from task.cross_validate import cross_validate, randomsearch, gridsearch, make_confusion_matrix
-from task.fingerprint import generate_fingerprints
+from task.fingerprint import generate_fingerprints, generate_embvec
 from task.predict import make_predictions, write_prediction
 from task.pretrain import pretrain_model, subset_learning
 from grover.data.torchvocab import MolVocab
@@ -16,6 +17,8 @@ from grover.topology.mol_tree import *
 
 #add for gridsearch
 from argparse import ArgumentParser, Namespace
+
+import torch.distributed as dist
 
 def setup(seed):
     # frozen random seed
@@ -63,8 +66,9 @@ class process_tracker(object):
 if __name__ == '__main__':
     # setup random seed
     setup(seed=42)
-    # Avoid the pylint warning.
+
     a = MolVocab
+
     # supress rdkit logger
     lg = RDLogger.logger()
     lg.setLevel(RDLogger.CRITICAL)
@@ -73,6 +77,7 @@ if __name__ == '__main__':
     mol_vocab = MolVocab
 
     args = parse_args()
+
     if args.parser_name == 'finetune':
         logger = create_logger(name='train', save_dir=args.save_dir, quiet=False)
         if args.randomsearch==True :  randomsearch(args, logger)
@@ -93,9 +98,18 @@ if __name__ == '__main__':
     elif args.parser_name == 'fingerprint':
         train_args = get_newest_train_args()
         logger = create_logger(name='fingerprint', save_dir=None, quiet=False)
-        feas = generate_fingerprints(args, logger)
+        if args.embvec==True : 
+            atom_vec, bond_vec = generate_embvec(args, logger)
+            if args.fingerprint_source=='atom':
+                feas = atom_vec
+            else : 
+                feas = bond_vec
+        else : 
+            feas = generate_fingerprints(args, logger)
+        
         np.savez_compressed(args.output_path, fps=feas)
     elif args.parser_name == 'predict':
         train_args = get_newest_train_args()
         avg_preds, test_smiles = make_predictions(args, train_args)
         write_prediction(avg_preds, test_smiles, args)       
+        

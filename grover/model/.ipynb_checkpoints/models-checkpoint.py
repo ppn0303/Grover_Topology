@@ -370,6 +370,7 @@ class GroverFinetuneTask(nn.Module):
 
         self.hidden_size = args.hidden_size
         self.iscuda = args.cuda
+        self.multi_class = args.multi_class
 
         self.grover = GROVEREmbedding(args)
 
@@ -382,13 +383,12 @@ class GroverFinetuneTask(nn.Module):
 
         self.mol_atom_from_atom_ffn = self.create_ffn(args)
         self.mol_atom_from_bond_ffn = self.create_ffn(args)
-        #self.ffn = nn.ModuleList()
-        #self.ffn.append(self.mol_atom_from_atom_ffn)
-        #self.ffn.append(self.mol_atom_from_bond_ffn)
 
         self.classification = args.dataset_type == 'classification'
-        if self.classification:
+        if self.classification and not args.multi_class:
             self.sigmoid = nn.Sigmoid()
+        elif self.classification and args.multi_class:
+            self.softmax = nn.Softmax(dim=1)
 
     def create_ffn(self, args: Namespace):
         """
@@ -443,8 +443,10 @@ class GroverFinetuneTask(nn.Module):
                       dt=args.dataset_type,
                       dist_coff=args.dist_coff):
 
-            if dt == 'classification':
+            if dt == 'classification' and not args.multi_class:
                 pred_loss = nn.BCEWithLogitsLoss(reduction='none')
+            elif dt == 'classification' and args.multi_class:
+                pred_loss = nn.CrossEntropyLoss(reduction='none')
             elif dt == 'regression':
                 pred_loss = nn.MSELoss(reduction='none')
             else:
@@ -454,7 +456,11 @@ class GroverFinetuneTask(nn.Module):
             # TODO: Here, should we need to involve the model status? Using len(preds) is just a hack.
             if type(preds) is not tuple:
                 # in eval mode.
-                return pred_loss(preds, targets)
+                if not args.multi_class:
+                    return pred_loss(preds, targets)
+                elif args.multi_class:
+                    return pred_loss(preds, targets.squeeze().to(torch.long))
+                
 
             # in train mode.
             dist_loss = nn.MSELoss(reduction='none')
@@ -462,9 +468,14 @@ class GroverFinetuneTask(nn.Module):
             # print(pred_loss)
 
             dist = dist_loss(preds[0], preds[1])
-            pred_loss1 = pred_loss(preds[0], targets)
-            pred_loss2 = pred_loss(preds[1], targets)
-            return pred_loss1 + pred_loss2 + dist_coff * dist
+            if not args.multi_class:
+                pred_loss1 = pred_loss(preds[0], targets)
+                pred_loss2 = pred_loss(preds[1], targets)
+                return pred_loss1 + pred_loss2 + dist_coff * dist
+            else : 
+                pred_loss1 = pred_loss(preds[0], targets.squeeze().to(torch.long))
+                pred_loss2 = pred_loss(preds[1], targets.squeeze().to(torch.long))
+                return pred_loss1 + pred_loss2 + dist_coff * dist.sum(dim=1)
 
         return loss_func
 
@@ -498,9 +509,12 @@ class GroverFinetuneTask(nn.Module):
         else:
             atom_ffn_output = self.mol_atom_from_atom_ffn(mol_atom_from_atom_output)
             bond_ffn_output = self.mol_atom_from_bond_ffn(mol_atom_from_bond_output)
-            if self.classification:
+            if self.classification and not self.multi_class:
                 atom_ffn_output = self.sigmoid(atom_ffn_output)
                 bond_ffn_output = self.sigmoid(bond_ffn_output)
+            elif self.classification and self.multi_class:
+                atom_ffn_output = self.softmax(atom_ffn_output)
+                bond_ffn_output = self.softmax(bond_ffn_output)
             output = (atom_ffn_output + bond_ffn_output) / 2
 
         return output
@@ -623,3 +637,53 @@ class GroverMotifTask(nn.Module):
                 "bv_task": (bv_task_pred_atom, bv_task_pred_bond),
                 "fg_task": fg_task_pred_all,
                 "emb_vec": embeddings}
+    
+class GroverEmbvecGeneration(nn.Module):
+    """
+    GroverFpGeneration class.
+    It loads the pre-trained model and produce the fingerprints for input molecules.
+    """
+    def __init__(self, args):
+        """
+        Init function.
+        :param args: the arguments.
+        """
+        super(GroverEmbvecGeneration, self).__init__()
+
+        self.fingerprint_source = args.fingerprint_source
+        self.iscuda = args.cuda
+
+        self.grover = GROVEREmbedding(args)
+        self.readout = Readout(rtype="mean", hidden_size=args.hidden_size)
+
+    def forward(self, batch, features_batch):
+        """
+        The forward function.
+        It takes graph batch and molecular feature batch as input and produce the fingerprints of this molecules.
+        :param batch:
+        :param features_batch:
+        :return:
+        """
+        _, _, _, _, _, a_scope, b_scope, _ = batch
+
+        output = self.grover(batch)
+        # Share readout
+        mol_atom_from_bond_output = self.readout(output["atom_from_bond"], a_scope)
+        mol_atom_from_atom_output = self.readout(output["atom_from_atom"], a_scope)
+
+        if features_batch[0] is not None:
+            features_batch = torch.from_numpy(np.stack(features_batch)).float()
+            if self.iscuda:
+                features_batch = features_batch.cuda()
+            features_batch = features_batch.to(output["atom_from_atom"])
+            if len(features_batch.shape) == 1:
+                features_batch = features_batch.view([1, features_batch.shape[0]])
+        else:
+            features_batch = None
+
+
+        if features_batch is not None:
+            mol_atom_from_atom_output = torch.cat([mol_atom_from_atom_output, features_batch], 1)
+            mol_atom_from_bond_output = torch.cat([mol_atom_from_bond_output, features_batch], 1)
+            
+        return mol_atom_from_atom_output, mol_atom_from_bond_output

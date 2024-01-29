@@ -301,7 +301,7 @@ class GroverCollator(object):
 
         atom_vocab_label = torch.Tensor(self.atom_random_mask(smiles_batch)).long()
         bond_vocab_label = torch.Tensor(self.bond_random_mask(smiles_batch)).long()
-        fgroup_label = torch.Tensor([d.features for d in batch]).float()
+        fgroup_label = torch.Tensor(np.array([d.features for d in batch])).float()
         # may be some mask here
         res = {"graph_input": batchgraph,
                "targets": {"av_task": atom_vocab_label,

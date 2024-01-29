@@ -11,11 +11,14 @@ from torch.nn import Module
 from torch.utils.data import DataLoader
 
 from grover.model.models import GroverTask, GroverMotifTask
-from grover.util.multi_gpu_wrapper import MultiGpuWrapper as mgw
+#from grover.util.multi_gpu_wrapper import MultiGpuWrapper as mgw
 from grover.util.utils import load_moltree
 
 #add for Topology predict
 from grover.topology.chemutils import group_node_rep
+
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 class GROVERTrainer:
     def __init__(self,
@@ -68,8 +71,8 @@ class GROVERTrainer:
         self.optimizer = optimizer_builder(self.model, self.args)
         self.scheduler = scheduler_builder(self.optimizer, self.args)
         if self.enable_multi_gpu:
-            self.optimizer = mgw.DistributedOptimizer(self.optimizer,
-                                                      named_parameters=self.model.named_parameters())
+            self.model=self.model.to(args.local_rank)
+            self.model=DDP(self.model, device_ids=[args.local_rank], find_unused_parameters=True)
         self.args = args
         self.n_iter = 0
 
@@ -80,8 +83,9 @@ class GROVERTrainer:
         """
         if self.enable_multi_gpu:
             # broadcast parameters & optimizer state.
-            mgw.broadcast_parameters(self.model.state_dict(), root_rank=0)
-            mgw.broadcast_optimizer_state(self.optimizer, root_rank=0)
+            #mgw.broadcast_parameters(self.model.state_dict(), root_rank=0)
+            #mgw.broadcast_optimizer_state(self.optimizer, root_rank=0)
+            print('dont use broadcast in torch')
 
     def train(self, epoch: int) -> List:
         """
@@ -336,12 +340,15 @@ class GROVERMotifTrainer:
         self.optimizer = optimizer_builder(self.model, self.args)
         self.motif_optimizer = torch.optim.Adam(self.motif_model.parameters(), lr=args.init_lr, weight_decay=args.weight_decay)
         self.scheduler = scheduler_builder(self.optimizer, self.args)
+        self.motif_scheduler = scheduler_builder(self.motif_optimizer, self.args)
         if self.enable_multi_gpu:
-            self.optimizer = mgw.DistributedOptimizer(self.optimizer,
-                                                      named_parameters=self.model.named_parameters())
+            self.model = self.model.to(args.local_rank)
+            self.model = DDP(self.model, device_ids=[args.local_rank], find_unused_parameters=True)
+            self.motif_model = self.motif_model.to(args.local_rank)
+            self.motif_model = DDP(self.motif_model, device_ids=[args.local_rank], find_unused_parameters=True)
+
         self.args = args
         self.n_iter = 0
-
         self.logger=logger
 
 
@@ -352,8 +359,11 @@ class GROVERMotifTrainer:
         """
         if self.enable_multi_gpu:
             # broadcast parameters & optimizer state.
-            mgw.broadcast_parameters(self.model.state_dict(), root_rank=0)
-            mgw.broadcast_optimizer_state(self.optimizer, root_rank=0)
+            #mgw.broadcast_parameters(self.model.state_dict(), root_rank=0)
+            #mgw.broadcast_optimizer_state(self.optimizer, root_rank=0)
+            #mgw.broadcast_parameters(self.motif_model.state_dict(), root_rank=0)
+            #mgw.broadcast_optimizer_state(self.motif_optimizer, root_rank=0)
+            print('dont use broadcast in torch')
 
     def train(self, epoch: int) -> List:
         """
@@ -493,10 +503,12 @@ class GROVERMotifTrainer:
                 self.model.zero_grad()
                 self.motif_model.zero_grad()
                 self.optimizer.zero_grad()
+                self.motif_optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
                 self.motif_optimizer.step()
                 self.scheduler.step()
+                self.motif_scheduler.step()
             else:
                 # For eval model, only consider the loss of three task.
                 cum_loss_sum += av_loss.item()
@@ -553,7 +565,9 @@ class GROVERMotifTrainer:
             'state_dict': self.model.state_dict(),
             'motif_state_dict' : self.motif_model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
+            'motif_optimizer': self.motif_optimizer.state_dict(),
             'scheduler_step': self.scheduler.current_step,
+            'motif_scheduler_step': self.motif_scheduler.current_step,
             "epoch": epoch,
             'data_scaler': {
                 'means': scaler.means,
@@ -572,6 +586,7 @@ class GROVERMotifTrainer:
             'state_dict': self.model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'scheduler_step': self.scheduler.current_step,
+            'motif_scheduler_step': self.motif_scheduler.current_step,
             "epoch": epoch,
             'data_scaler': {
                 'means': scaler.means,
@@ -609,7 +624,9 @@ class GROVERMotifTrainer:
             'state_dict': self.model.state_dict(),
             'motif_state_dict': self.motif_model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
+            'motif_optimizer': self.motif_optimizer.state_dict(),
             'scheduler_step': self.scheduler.current_step,
+            'motif_scheduler_step': self.motif_scheduler.current_step,
             "epoch": epoch
         }
         torch.save(state, store_path)
@@ -644,7 +661,9 @@ class GROVERMotifTrainer:
             'state_dict': self.model.state_dict(),
             'motif_state_dict': self.motif_model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
+            'motif_optimizer': self.motif_optimizer.state_dict(),
             'scheduler_step': self.scheduler.current_step,
+            'motif_scheduler_step': self.motif_scheduler.current_step,
             "epoch": epoch
         }
         torch.save(state, save_path)
@@ -675,6 +694,10 @@ class GROVERMotifTrainer:
         self.model.load_state_dict(cpt["state_dict"])
         self.motif_model.load_state_dict(cpt["motif_state_dict"])
         self.optimizer.load_state_dict(cpt["optimizer"])
+        try : self.motif_optimizer.load_state_dict(cpt["motif_optimizer"])
+        except KeyError: print('pass')
+        try : self.motif_scheduler.current_step = cpt["motif_scheduler_step"]
+        except KeyError: print('pass')
         epoch = cpt["epoch"]
         scheduler_step = cpt["scheduler_step"]
         self.scheduler.current_step = scheduler_step

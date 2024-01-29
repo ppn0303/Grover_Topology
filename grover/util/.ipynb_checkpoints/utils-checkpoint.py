@@ -12,6 +12,7 @@ from logging import Logger
 from typing import List, Set, Tuple, Union, Dict
 
 import numpy as np
+import pandas as pd
 import torch
 from rdkit import Chem
 from rdkit.Chem.Scaffolds import MurckoScaffold
@@ -19,7 +20,7 @@ from torch import nn as nn
 from tqdm import tqdm as core_tqdm
 
 from grover.data import MoleculeDatapoint, MoleculeDataset, StandardScaler
-from grover.model.models import GroverFpGeneration, GroverFinetuneTask
+from grover.model.models import GroverFpGeneration, GroverFinetuneTask, GroverEmbvecGeneration
 from grover.util.nn_utils import initialize_weights
 from grover.util.scheduler import NoamLR
 
@@ -211,6 +212,13 @@ def get_data(path: str,
         features_path = features_path if features_path is not None else args.features_path
         max_data_size = max_data_size if max_data_size is not None else args.max_data_size
         use_compound_names = use_compound_names if use_compound_names is not None else args.use_compound_names
+        if args.dataset_type == 'classification':
+            labels = pd.read_csv(path, header=None)[1][1:]
+            try : unique_labels = np.unique(labels[~labels.isnull()])
+            except : unique_labels = np.unique(labels[~labels.isnull()].astype(float))
+            if len(unique_labels) > 2:
+                args.multi_class = True
+                args.multi_class_num = len(unique_labels)
     else:
         use_compound_names = False
 
@@ -229,7 +237,10 @@ def get_data(path: str,
             args.features_dim = 0
 
     skip_smiles = set()
-
+    
+    #add for multi_class
+    
+    
     # Load data
     with open(path) as f:
         reader = csv.reader(f)
@@ -463,7 +474,7 @@ def split_data(data: MoleculeDataset,
         raise ValueError(f'split_type "{split_type}" not supported.')
 
 
-def get_class_sizes(data: MoleculeDataset) -> List[List[float]]:
+def get_class_sizes(data, args):
     """
     Determines the proportions of the different classes in the classification dataset.
 
@@ -474,23 +485,29 @@ def get_class_sizes(data: MoleculeDataset) -> List[List[float]]:
     targets = data.targets()
 
     # Filter out Nones
-    valid_targets = [[] for _ in range(data.num_tasks())]
-    for i in range(len(targets)):
-        for task_num in range(len(targets[i])):
-            if targets[i][task_num] is not None:
-                valid_targets[task_num].append(targets[i][task_num])
+    if not args.multi_class : 
+        valid_targets = [[] for _ in range(data.num_tasks())]
+        for i in range(len(targets)):
+            for task_num in range(len(targets[i])):
+                if targets[i][task_num] is not None:
+                    valid_targets[task_num].append(targets[i][task_num])
 
-    class_sizes = []
-    for task_targets in valid_targets:
-        # Make sure we're dealing with a binary classification task
-        assert set(np.unique(task_targets)) <= {0, 1}
+        class_sizes = []
+        for task_targets in valid_targets:
+            # Make sure we're dealing with a binary classification task
+            assert set(np.unique(task_targets)) <= {0, 1}  #no I add multi_task
 
-        try:
-            ones = np.count_nonzero(task_targets) / len(task_targets)
-        except ZeroDivisionError:
-            ones = float('nan')
-            print('Warning: class has no targets')
-        class_sizes.append([1 - ones, ones])
+            try:
+                ones = np.count_nonzero(task_targets) / len(task_targets)
+            except ZeroDivisionError:
+                ones = float('nan')
+                print('Warning: class has no targets')
+            class_sizes.append([1 - ones, ones])
+    elif args.multi_class : 
+        targets = np.array(targets)
+        class_sizes = []
+        for i in range(args.multi_class_num):
+            class_sizes.append(sum(targets==i)/len(targets))
 
     return class_sizes
 
@@ -897,7 +914,7 @@ def get_loss_func(args: Namespace, model=None):
     """
     if hasattr(model, "get_loss_func"):
         return model.get_loss_func(args)
-    if args.dataset_type == 'classification':
+    if args.dataset_type == 'classification' and not args.multi_class:
         return nn.BCEWithLogitsLoss(reduction='none')
     if args.dataset_type == 'regression':
         return nn.MSELoss(reduction='none')
@@ -959,13 +976,17 @@ def build_model(args: Namespace, model_idx=0):
     :param args: Arguments.
     :return: A MPNN containing the MPN encoder along with final linear layers with parameters initialized.
     """
-    if hasattr(args, 'num_tasks'):
+    if hasattr(args, 'num_tasks') and not args.multi_class:
         args.output_size = args.num_tasks
+    elif args.multi_class:
+        args.output_size = args.multi_class_num
     else:
         args.output_size = 1
+    
 
     if args.parser_name == "fingerprint":
-        model = GroverFpGeneration(args)
+        if args.embvec==True : model = GroverEmbvecGeneration(args)
+        else : model = GroverFpGeneration(args)
     else:
         # finetune and evaluation case.
         model = GroverFinetuneTask(args)

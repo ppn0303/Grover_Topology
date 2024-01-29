@@ -62,6 +62,9 @@ def add_fingerprint_args(parser):
                         choices=['atom', 'bond', 'both'], default='both',
                         help='The source to generate the fingerprints.')
     parser.add_argument('--checkpoint_path', type=str, help='model path')
+    
+    # add these for embedding vector extract
+    parser.add_argument('--embvec', action='store_true', default=False, help='embedding vector extract')
 
 
 def add_finetune_args(parser: ArgumentParser):
@@ -240,14 +243,16 @@ def add_finetune_args(parser: ArgumentParser):
     #for smote
     parser.add_argument('--smote', action='store_true', default=False, help='smote mode')
     parser.add_argument('--smote_rate', type=float, default=1, help='smote sampling rate')
-      #for make confusion matrix
-    parser.add_argument('--confusionmatrix', action='store_true', default=False, help='smote mode')
+    #for make confusion matrix
+    parser.add_argument('--confusionmatrix', action='store_true', default=False, help='print confusion matrix and metrics')
 
     #for wandb
     parser.add_argument('--wandb', action='store_true', default=False, help='add wandb log')
     parser.add_argument('--wandb_name', type=str, default = 'finetune', help='wandb name')
 
-
+    #for multi_class
+    parser.add_argument('--multi_class', action='store_true', default=False, help='multi class mode')
+    parser.add_argument('--multi_class_num', type=int, default=3,help='Number of class')
 
 def add_pretrain_args(parser: ArgumentParser):
     parser.add_argument('--cuda', type=bool, default=True,
@@ -255,6 +260,12 @@ def add_pretrain_args(parser: ArgumentParser):
     parser.add_argument('--enable_multi_gpu', dest='enable_multi_gpu',
                         action='store_true', default=False,
                         help='enable multi-GPU training')
+
+    #torch ddp
+    parser.add_argument('--master_worker', action='store_true', default=True)
+    parser.add_argument('--rank', type=int, default=0)
+    parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument('--num_replicas', type=int, default=1)
 
     # Data arguments
     parser.add_argument('--data_path', type=str,

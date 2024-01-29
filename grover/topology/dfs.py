@@ -199,23 +199,18 @@ class Motif_Generation_dfs(nn.Module):
             em_list.append(torch.sum(node_rep[mol_index].index_select(0, torch.tensor(node_x.clique).to(self.device)), dim=0))
             cur_nei = [h[(node_y.idx, node_x.idx)] for node_y in node_x.neighbors]
             pad_len = MAX_NB - len(cur_nei)
-            cur_o_nei.extend(cur_nei)
-            cur_o_nei.extend([padding] * pad_len)
+            if pad_len >= 0:
+                cur_o_nei.extend(cur_nei)
+                cur_o_nei.extend([padding] * pad_len)
+            else:
+                cur_o_nei.extend(cur_nei[:MAX_NB])
 
         cur_x = torch.stack(em_list, dim=0)
         try : 
             cur_o_nei = torch.stack(cur_o_nei, dim=0).view(-1, MAX_NB, self.hidden_size)
             cur_o = cur_o_nei.sum(dim=1)
         except : 
-            for mol_index, mol_tree in enumerate(mol_batch):
-                print(f'mol_tree smiles is {mol_tree.smiles}')
             print(f'error smiles is {mol_tree.smiles}')
-            print(cur_o_nei)
-            print(cur_o_nei.shape)
-            print(cur_x)
-            print(cur_x.shape)
-            print(torch.stack(cur_o_nei, dim=0).view(-1, MAX_NB, self.hidden_size))
-            print(torch.stack(cur_o_nei, dim=0).view(-1, MAX_NB, self.hidden_size).sum(dim=1))
 
 
         stop_hidden = torch.cat([cur_x, cur_o], dim=1)

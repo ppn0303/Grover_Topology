@@ -6,7 +6,7 @@ import time
 import torch
 from torch.utils.data.sampler import Sampler
 import torch.distributed as dist
-
+import numpy as np 
 
 class DistributedSampler(Sampler):
     """Sampler that restricts data loading to a subset of the dataset.
@@ -64,7 +64,7 @@ class DistributedSampler(Sampler):
         if self.shuffle:
             g = torch.Generator()
             # the seed need to be considered.
-            g.manual_seed((self.epoch + 1) * (self.rank + 1) * time.time())
+            g.manual_seed((self.epoch + 1) * (self.rank + 1) * np.long(time.time()))
             idx = torch.randperm(len(indices), generator=g).tolist()
             indices = [indices[i] for i in idx]
 

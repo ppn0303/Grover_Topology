@@ -10,19 +10,24 @@ import numpy as np
 
 import torch
 from torch.utils.data import DataLoader
-import wandb
+#import wandb
 
 from grover.data.dist_sampler import DistributedSampler
 from grover.data.groverdataset import get_data, split_data, GroverCollator, BatchMolDataset, get_motif_data, split_data_motif, GroverMotifCollator, BatchMolDataset_motif
 from grover.data.torchvocab import MolVocab
 from grover.model.models import GROVEREmbedding
-from grover.util.multi_gpu_wrapper import MultiGpuWrapper as mgw
+#from grover.util.multi_gpu_wrapper import MultiGpuWrapper as mgw
 from grover.util.nn_utils import param_count
 from grover.util.utils import build_optimizer, build_lr_scheduler
 from task.grovertrainer import GROVERTrainer, GROVERMotifTrainer
 
+#for topology
 from grover.topology.mol_tree import Motif_Vocab
 from grover.topology.motif_generation import Motif_Generation
+#for torch ddp
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group, broadcast
 
 def pretrain_model(args: Namespace, logger: Logger = None):
     """
@@ -31,7 +36,6 @@ def pretrain_model(args: Namespace, logger: Logger = None):
     :param logger: the logger.
     :return:
     """
-
     # avoid auto optimized import by pycharm.
     a = MolVocab
     s_time = time.time()
@@ -41,6 +45,7 @@ def pretrain_model(args: Namespace, logger: Logger = None):
         run_training(args=args, logger=logger)
     e_time = time.time()
     print("Total Time: %.3f" % (e_time - s_time))
+    destroy_process_group()
     
 def subset_learning(args: Namespace, logger: Logger = None, process = None):
     a = MolVocab
@@ -90,49 +95,52 @@ def run_training(args, logger):
     :param logger:
     :return:
     """
-
+    with_cuda = args.cuda
     # initalize the logger.
     if logger is not None:
-        debug, _ = logger.debug, logger.info
+        debug, info = logger.debug, logger.info
     else:
         debug = print
 
-    # initialize the horovod library
+    # multi_gpu_setting
+#    try : 
+#        args.rank = int(os.environ["SLURM_PROCID"]) if args.enable_multi_gpu else 0
+#        gpus_per_node = int(os.environ["SLURM_GPUS_ON_NODE"])
+#        assert gpus_per_node == torch.cuda.device_count()
+#    except:
+    args.rank = int(os.environ["RANK"]) if args.enable_multi_gpu else 0
+
+    gpus_per_node = torch.cuda.device_count()
+    args.num_replicas = int(os.environ["WORLD_SIZE"]) if args.enable_multi_gpu else 1
+    args.master_worker = args.rank==0 if args.enable_multi_gpu else True
+
     if args.enable_multi_gpu:
-        mgw.init()
+        dist.init_process_group(backend="nccl")
+    if args.master_worker: print(f"Group initialized? {dist.is_initialized()}", flush=True)
 
-    # binding training to GPUs.
-    master_worker = (mgw.rank() == 0) if args.enable_multi_gpu else True
-    # pin GPU to local rank. By default, we use gpu:0 for training.
-    local_gpu_idx = mgw.local_rank() if args.enable_multi_gpu else 0
-    with_cuda = args.cuda
-    if with_cuda:
-        torch.cuda.set_device(local_gpu_idx)
+    args.local_rank = args.rank - gpus_per_node * (args.rank // gpus_per_node) if args.enable_multi_gpu else 0
+    if args.cuda:
+        torch.cuda.set_device(args.local_rank)
+    print(f'rank : {args.rank}, local_rank : {args.local_rank}, world_size : {args.num_replicas}, hostname : {gethostname()}, gpu per node : {gpus_per_node}')
 
-    # get rank an  number of workers
-    rank = mgw.rank() if args.enable_multi_gpu else 0
-    num_replicas = mgw.size() if args.enable_multi_gpu else 1
-    # print("Rank: %d Rep: %d" % (rank, num_replicas))
 
     # load file paths of the data.
-    if master_worker:
+    if args.master_worker:
         print(args)
-        if args.enable_multi_gpu:
-            debug("Total workers: %d" % (mgw.size()))
         debug('Loading data')
     data, sample_per_file = get_data(data_path=args.data_path)
 
     # data splitting
-    if master_worker:
+    if args.master_worker:
         debug(f'Splitting data with seed 0.')
     train_data, test_data, _ = split_data(data=data, sizes=(0.9, 0.1, 0.0), seed=0, logger=logger)
 
     # Here the true train data size is the train_data divided by #GPUs
     if args.enable_multi_gpu:
-        args.train_data_size = len(train_data) // mgw.size()
+        args.train_data_size = len(train_data) // args.num_replicas
     else:
         args.train_data_size = len(train_data)
-    if master_worker:
+    if args.master_worker:
         debug(f'Total size = {len(data):,} | '
               f'train size = {len(train_data):,} | val size = {len(test_data):,}')
 
@@ -145,7 +153,7 @@ def run_training(args, logger):
     fg_size = 85
     shared_dict = {}
     mol_collator = GroverCollator(shared_dict=shared_dict, atom_vocab=atom_vocab, bond_vocab=bond_vocab, args=args)
-    if master_worker:
+    if args.master_worker:
         debug("atom vocab size: %d, bond vocab size: %d, Number of FG tasks: %d" % (atom_vocab_size,
                                                                                     bond_vocab_size, fg_size))
 
@@ -156,34 +164,34 @@ def run_training(args, logger):
     if args.enable_multi_gpu:
         # If not shuffle, the performance may decayed.
         train_sampler = DistributedSampler(
-            train_data, num_replicas=mgw.size(), rank=mgw.rank(), shuffle=True, sample_per_file=sample_per_file)
+            train_data, num_replicas=args.num_replicas, rank=args.rank, shuffle=True, sample_per_file=sample_per_file)
         # Here sample_per_file in test_sampler is None, indicating the test sampler would not divide the test samples by
         # rank. (TODO: bad design here.)
         test_sampler = DistributedSampler(
-            test_data, num_replicas=mgw.size(), rank=mgw.rank(), shuffle=False)
+            test_data, num_replicas=args.num_replicas, rank=args.rank, shuffle=False)
         train_sampler.set_epoch(args.epochs)
         test_sampler.set_epoch(1)
         # if we enables multi_gpu training. shuffle should be disabled.
         shuffle = False
 
     # Pre load data. (Maybe unnecessary. )
-#    pre_load_data(train_data, rank, num_replicas, sample_per_file)
-#    pre_load_data(test_data, rank, num_replicas)
-#    if master_worker:
-        # print("Pre-loaded training data: %d" % train_data.count_loaded_datapoints())
-#        print("Pre-loaded test data: %d" % test_data.count_loaded_datapoints())
+    pre_load_data(train_data, args.rank, args.num_replicas, sample_per_file)
+    pre_load_data(test_data, args.rank, args.num_replicas)
+    if args.master_worker:
+        debug("Pre-loaded training data: %d" % train_data.count_loaded_datapoints())
+        debug("Pre-loaded test data: %d" % test_data.count_loaded_datapoints())
 
     # Build dataloader
     train_data_dl = DataLoader(train_data,
                                batch_size=args.batch_size,
                                shuffle=shuffle,
-                               num_workers=12,
+                               num_workers=4,
                                sampler=train_sampler,
                                collate_fn=mol_collator)
     test_data_dl = DataLoader(test_data,
                               batch_size=args.batch_size,
                               shuffle=shuffle,
-                              num_workers=10,
+                              num_workers=4,
                               sampler=test_sampler,
                               collate_fn=mol_collator)
 
@@ -208,19 +216,19 @@ def run_training(args, logger):
     model_dir = os.path.join(args.save_dir, "model")
     resume_from_epoch = 0
     resume_scheduler_step = 0
-    if master_worker:
-        resume_from_epoch, resume_scheduler_step = trainer.restore(model_dir)
-    if args.enable_multi_gpu:
-        resume_from_epoch = mgw.broadcast(torch.tensor(resume_from_epoch), root_rank=0, name="resume_from_epoch").item()
-        resume_scheduler_step = mgw.broadcast(torch.tensor(resume_scheduler_step),
-                                              root_rank=0, name="resume_scheduler_step").item()
-        trainer.scheduler.current_step = resume_scheduler_step
-        print("Restored epoch: %d Restored scheduler step: %d" % (resume_from_epoch, trainer.scheduler.current_step))
-    trainer.broadcast_parameters()
+#    if args.master_worker:
+    resume_from_epoch, resume_scheduler_step = trainer.restore(model_dir)
+    trainer.scheduler.current_step = resume_scheduler_step
+#    if args.enable_multi_gpu:
+#        resume_from_epoch = mgw.broadcast(torch.tensor(resume_from_epoch), root_rank=0, name="resume_from_epoch").item()
+#        resume_scheduler_step = mgw.broadcast(torch.tensor(resume_scheduler_step),
+#                                              root_rank=0, name="resume_scheduler_step").item()
+    info("Restored epoch: %d Restored scheduler step: %d" % (resume_from_epoch, trainer.scheduler.current_step))
+    #trainer.broadcast_parameters()
 
 
     # Print model details.
-    if master_worker:
+    if args.master_worker:
         # Change order here.
         print(grover_model)
         print("Total parameters: %d" % param_count(trainer.grover))
@@ -239,9 +247,9 @@ def run_training(args, logger):
 
         if not args.enable_multi_gpu:
             train_data.clean_cache()
-            pre_load_data(train_data, rank, num_replicas, sample_per_file)
+            pre_load_data(train_data, args.rank, args.num_replicas, sample_per_file)
             test_data.clean_cache()
-            pre_load_data(test_data, rank, num_replicas)
+            pre_load_data(test_data, args.rank, args.num_replicas)
 
 
         d_time = time.time() - s_time
@@ -257,7 +265,7 @@ def run_training(args, logger):
         v_time = time.time() - s_time
 
         # print information.
-        if master_worker:
+        if args.master_worker:
             print('Epoch: {:04d}'.format(epoch),
                   'loss_train: {:.6f}'.format(train_loss),
                   'loss_val: {:.6f}'.format(val_loss),
@@ -270,17 +278,21 @@ def run_training(args, logger):
                   'd_time: {:.4f}s'.format(d_time), flush=True)
 
             if epoch % args.save_interval == 0:
-                trainer.save(epoch, model_dir)
+                if args.master_worker:
+                    trainer.save(epoch, model_dir)
+                    print(f'epoch : {epoch} cp saved')
 
-
-            trainer.save_tmp(epoch, model_dir, rank)
+            if args.master_worker:
+                trainer.save_tmp(epoch, model_dir, args.rank)
+                print(f'temp cp saved')
 
         # empty cache of validation
         torch.cuda.empty_cache()
 
     # Only save final version.
-    if master_worker:
+    if args.master_worker:
         trainer.save(args.epochs, model_dir, "")
+        print(f'final cp saved')
 
         
 def run_motif_training(args, logger, process=None):
@@ -297,43 +309,48 @@ def run_motif_training(args, logger, process=None):
     else:
         debug = print
 
-    # initialize the horovod library
-    if args.enable_multi_gpu:
-        mgw.init()
-
-    # binding training to GPUs.
-    master_worker = (mgw.rank() == 0) if args.enable_multi_gpu else True
-    # pin GPU to local rank. By default, we use gpu:0 for training.
-    local_gpu_idx = mgw.local_rank() if args.enable_multi_gpu else 0
     with_cuda = args.cuda
-    if with_cuda:
-        torch.cuda.set_device(local_gpu_idx)
 
-    # get rank an  number of workers
-    rank = mgw.rank() if args.enable_multi_gpu else 0
-    num_replicas = mgw.size() if args.enable_multi_gpu else 1
-    # print("Rank: %d Rep: %d" % (rank, num_replicas))
+    # multi_gpu_setting
+#    try : 
+#        args.rank = int(os.environ["SLURM_PROCID"]) if args.enable_multi_gpu else 0
+#        gpus_per_node = int(os.environ["SLURM_GPUS_ON_NODE"])
+#        assert gpus_per_node == torch.cuda.device_count()
+#    except:
+    args.rank = int(os.environ["RANK"]) if args.enable_multi_gpu else 0
+
+    gpus_per_node = torch.cuda.device_count()
+    args.num_replicas = int(os.environ["WORLD_SIZE"]) if args.enable_multi_gpu else 1
+    args.master_worker = args.rank==0 if args.enable_multi_gpu else True
+
+    if args.enable_multi_gpu:
+        dist.init_process_group(backend="nccl")
+    if args.master_worker: print(f"Group initialized? {dist.is_initialized()}", flush=True)
+
+    args.local_rank = args.rank - gpus_per_node * (args.rank // gpus_per_node) if args.enable_multi_gpu else 0
+    if args.cuda:
+        torch.cuda.set_device(args.local_rank)
+    print(f'rank : {args.rank}, local_rank : {args.local_rank}, world_size : {args.num_replicas}, hostname : {gethostname()}, gpu per node : {gpus_per_node}')
+
 
     # load file paths of the data.
-    if master_worker:
+    if args.master_worker:
         info(args)
-        if args.enable_multi_gpu:
-            debug("Total workers: %d" % (mgw.size()))
         debug('Loading data')
-        print(f'data path is {args.data_path}')
+        debug(f'data path is {args.data_path}')
     data, sample_per_file = get_motif_data(data_path=args.data_path)
 
     # data splitting
-    if master_worker:
+    if args.master_worker:
         debug(f'Splitting data with seed 0.')
     train_data, test_data, _ = split_data_motif(data=data, sizes=(0.9, 0.1, 0.0), seed=0, logger=logger)
 
     # Here the true train data size is the train_data divided by #GPUs
     if args.enable_multi_gpu:
-        args.train_data_size = len(train_data) // mgw.size()
+        args.train_data_size = len(train_data) // args.num_replicas
     else:
         args.train_data_size = len(train_data)
-    if master_worker:
+    if args.master_worker:
         info(f'Total size = {len(data):,} | '
               f'train size = {len(train_data):,} | val size = {len(test_data):,}')
 
@@ -343,7 +360,6 @@ def run_motif_training(args, logger, process=None):
     atom_vocab_size, bond_vocab_size = len(atom_vocab), len(bond_vocab)
 
     # Load motif vocabulary for pretrain
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     motif_vocab = [x.strip("\r\n ") for x in open(args.motif_vocab_path)]
     motif_vocab = Motif_Vocab(motif_vocab)
 
@@ -351,7 +367,7 @@ def run_motif_training(args, logger, process=None):
     fg_size = 85
     shared_dict = {}
     motif_collator = GroverMotifCollator(shared_dict=shared_dict, atom_vocab=atom_vocab, bond_vocab=bond_vocab, args=args)
-    if master_worker:
+    if args.master_worker:
         debug("atom vocab size: %d, bond vocab size: %d, Number of FG tasks: %d" % (atom_vocab_size,
                                                                                     bond_vocab_size, fg_size))
 
@@ -362,34 +378,34 @@ def run_motif_training(args, logger, process=None):
     if args.enable_multi_gpu:
         # If not shuffle, the performance may decayed.
         train_sampler = DistributedSampler(
-            train_data, num_replicas=mgw.size(), rank=mgw.rank(), shuffle=True, sample_per_file=sample_per_file)
+            train_data, num_replicas=args.num_replicas, rank=args.rank, shuffle=True, sample_per_file=sample_per_file)
         # Here sample_per_file in test_sampler is None, indicating the test sampler would not divide the test samples by
         # rank. (TODO: bad design here.)
         test_sampler = DistributedSampler(
-            test_data, num_replicas=mgw.size(), rank=mgw.rank(), shuffle=False)
+            test_data, num_replicas=args.num_replicas, rank=args.rank, shuffle=False)
         train_sampler.set_epoch(args.epochs)
         test_sampler.set_epoch(1)
         # if we enables multi_gpu training. shuffle should be disabled.
         shuffle = False
 
     # Pre load data. (Maybe unnecessary. )
-    pre_load_data(train_data, rank, num_replicas, sample_per_file)
-    pre_load_data(test_data, rank, num_replicas)
-    if master_worker:
+    pre_load_data(train_data, args.rank, args.num_replicas, sample_per_file)
+    pre_load_data(test_data, args.rank, args.num_replicas)
+    if args.master_worker:
         # print("Pre-loaded training data: %d" % train_data.count_loaded_datapoints())
         info("Pre-loaded test data: %d" % test_data.count_loaded_datapoints())
 
-    # Build dataloader
+    # Build dataloader             # 여기 질문하기!
     train_data_dl = DataLoader(train_data,
                                batch_size=args.batch_size,
                                shuffle=shuffle,
-                               num_workers=0,
+                               num_workers=4,
                                sampler=train_sampler,
                                collate_fn=motif_collator)
     test_data_dl = DataLoader(test_data,
                               batch_size=args.batch_size,
                               shuffle=shuffle,
-                              num_workers=0,
+                              num_workers=4,
                               sampler=test_sampler,
                               collate_fn=motif_collator)
 
@@ -397,7 +413,7 @@ def run_motif_training(args, logger, process=None):
     grover_model = GROVEREmbedding(args)
     
     # build the topology predict model.
-    motif_model = Motif_Generation(motif_vocab, args.motif_hidden_size, args.motif_latent_size, 3, device, args.motif_order)
+    motif_model = Motif_Generation(motif_vocab, args.motif_hidden_size, args.motif_latent_size, 3, args.local_rank, args.motif_order)
 
     #  Build the trainer.
     trainer = GROVERMotifTrainer(args=args,
@@ -418,14 +434,12 @@ def run_motif_training(args, logger, process=None):
     model_dir = os.path.join(args.save_dir, "model")
     resume_from_epoch = 0
     resume_scheduler_step = 0
-    if master_worker:
-        resume_from_epoch, resume_scheduler_step = trainer.restore(model_dir)
-    if args.enable_multi_gpu:
-        resume_from_epoch = mgw.broadcast(torch.tensor(resume_from_epoch), root_rank=0, name="resume_from_epoch").item()
-        resume_scheduler_step = mgw.broadcast(torch.tensor(resume_scheduler_step),
-                                              root_rank=0, name="resume_scheduler_step").item()
-        trainer.scheduler.current_step = resume_scheduler_step
-        info("Restored epoch: %d Restored scheduler step: %d" % (resume_from_epoch, trainer.scheduler.current_step))
+    resume_from_epoch, resume_scheduler_step = trainer.restore(model_dir)
+#    if args.enable_multi_gpu:
+#        resume_from_epoch = broadcast(torch.tensor(resume_from_epoch).cuda(), src=0)
+#        resume_scheduler_step = broadcast(torch.tensor(resume_scheduler_step).cuda(), src=0)
+#        trainer.scheduler.current_step = resume_scheduler_step
+    info(f'Restored epoch: {resume_from_epoch} Restored scheduler step: {trainer.scheduler.current_step}')
         
     # 
     if args.subset_learning : 
@@ -433,10 +447,10 @@ def run_motif_training(args, logger, process=None):
     else : 
         left_epochs = range(resume_from_epoch + 1, args.epochs+1)
         
-    trainer.broadcast_parameters()
+#    trainer.broadcast_parameters()
 
     # Print model details.
-    if master_worker:
+    if args.master_worker:
         # Change order here.
         print(grover_model)
         debug("Total parameters: %d" % param_count(trainer.grover))
@@ -466,9 +480,9 @@ def run_motif_training(args, logger, process=None):
 
         if not args.enable_multi_gpu:
             train_data.clean_cache()
-            pre_load_data(train_data, rank, num_replicas, sample_per_file)
+            pre_load_data(train_data, args.rank, args.num_replicas, sample_per_file)
             test_data.clean_cache()
-            pre_load_data(test_data, rank, num_replicas)
+            pre_load_data(test_data, args.rank, args.num_replicas)
 
 
         # perform training and validation.
@@ -489,7 +503,7 @@ def run_motif_training(args, logger, process=None):
             wandb.log({"train_loss" : train_loss, "val_loss" : val_loss, "topo_loss" : val_topo_loss})
         
         # print information.
-        if master_worker:
+        if args.master_worker:
             print('Epoch: {:04d}'.format(epoch),
                   'loss_train: {:.6f}'.format(train_loss),
                   'loss_val: {:.6f}'.format(val_loss),
@@ -510,11 +524,11 @@ def run_motif_training(args, logger, process=None):
                 trainer.save(epoch, model_dir)
 
 
-            trainer.save_tmp(epoch, model_dir, rank)
+            trainer.save_tmp(epoch, model_dir, args.rank)
             
             
 
 
     # Only save final version. but in subset learning, don't need this
-    #if master_worker:
+    #if args.master_worker:
         #trainer.save(epoch, model_dir, "")

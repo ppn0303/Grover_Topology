@@ -199,8 +199,11 @@ class Motif_Generation_dfs(nn.Module):
             em_list.append(torch.sum(node_rep[mol_index].index_select(0, torch.tensor(node_x.clique).to(self.device)), dim=0))
             cur_nei = [h[(node_y.idx, node_x.idx)] for node_y in node_x.neighbors]
             pad_len = MAX_NB - len(cur_nei)
-            cur_o_nei.extend(cur_nei)
-            cur_o_nei.extend([padding] * pad_len)
+            if pad_len >= 0:
+                cur_o_nei.extend(cur_nei)
+                cur_o_nei.extend([padding] * pad_len)
+            else : 
+                cur_o_nei.extend(cur_nei[:max_NB])
 
         cur_x = torch.stack(em_list, dim=0)
         try : 
